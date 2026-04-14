@@ -2,3 +2,7 @@
 /.vscode
 # Carpeta con el ROADMAP
 /mds
+
+
+#compilados
+src/baseline/seq

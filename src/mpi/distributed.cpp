@@ -1,0 +1,1 @@
+//primero implemento mi verisión cuda y luego genero un esquema en el que haya diferentes ordenadores con diferentes graficas (no testeable)

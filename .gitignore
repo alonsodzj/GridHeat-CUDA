@@ -6,3 +6,6 @@
 
 #compilados
 src/baseline/seq
+src/parallel/pll
+src/cuda/cuda
+src/mpi/mpi

@@ -3,6 +3,7 @@
 #include <iomanip>
 #include <string>
 #include <algorithm> // Para std::swap
+#include <chrono>   // Para medir el tiempo que tarda
 
 void print_matrix(const std::vector<float>& matrix, const int W, const int H) {
     std::cout << "--- Matrix State ---" << std::endl;
@@ -13,6 +14,14 @@ void print_matrix(const std::vector<float>& matrix, const int W, const int H) {
         std::cout << "\n";
     }
     std::cout << std::endl;
+}
+
+void print_value(const int DIM_N,const int W, const int H, const std::vector<float>& matrix){
+    if (DIM_N <= 20) {
+        print_matrix(matrix, W, H);
+    } else {
+        std::cout << "Cálculo finalizado. Valor central: " << matrix[(H/2)*W + (W/2)] << std::endl;
+    }
 }
 
 void compute_stencil_sequencial(const int W, const int H, const std::vector<float>& T_old, std::vector<float>& T_new) {
@@ -64,6 +73,9 @@ int main(int argc, char* argv[]) {
     std::cout << std::fixed << std::setprecision(2);
     std::cout << "Dimensiones: " << W << "x" << H << " (" << NUM_ITERS << " iters)" << std::endl;
 
+    // Timestamp antes de llegar al bucle
+    auto start = std::chrono::high_resolution_clock::now();
+
     // Proceso iterativo
     for(int i = 0; i < NUM_ITERS; ++i) {
         compute_stencil_sequencial(W, H, matrix_old, matrix_new);
@@ -72,8 +84,13 @@ int main(int argc, char* argv[]) {
         std::swap(matrix_old, matrix_new);
     }
 
+    //Timestamp después del bucle
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> diff = end - start;
+    std::cout << "Tiempo secuencial: " << diff.count() << " segundos" << std::endl;
+
     // Imprimimos el resultado final
-    print_matrix(matrix_old, W, H);
+    print_value(DIM_N, W, H, matrix_old);
 
     return 0;
 }

@@ -2,20 +2,30 @@
 #include <iostream>
 #include <iomanip>
 #include <vector>
-#include <chrono>
 #include <algorithm> // Para std::swap
 
-// Definimos el tamaño del bloque (16x16 es el estándar de oro en CUDA para matrices 2D)
 #define BLOCK_X 16
 #define BLOCK_Y 16
 
-// -------------------------------------------------------------------------
+// GPU TIMER
+// Usamos eventos CUDA para medir el tiempo directamente en la GPU.
+// Es más preciso que chrono porque no incluye latencias del driver de CPU.
+struct GpuTimer {
+    cudaEvent_t start, stop;
+    GpuTimer()  { cudaEventCreate(&start); cudaEventCreate(&stop); }
+    ~GpuTimer() { cudaEventDestroy(start); cudaEventDestroy(stop); }
+    void Start() { cudaEventRecord(start); }
+    void Stop()  { cudaEventRecord(stop); cudaEventSynchronize(stop); }
+    float ElapsedMs() { float ms; cudaEventElapsedTime(&ms, start, stop); return ms; }
+};
+
 // KERNEL DE CUDA
-// -------------------------------------------------------------------------
-__global__ void compute_stencil_cuda_shared(const float* T_old, float* T_new, int W, int H) {
+// Añadimos __restrict__ a los punteros para indicarle al compilador que
+// T_old y T_new nunca se solapan en memoria. Esto habilita optimizaciones
+__global__ void compute_stencil_cuda_shared(const float* __restrict__ T_old, float* __restrict__ T_new, int W, int H) {
     // 1. MEMORIA COMPARTIDA: Es como una caché L1 manual ultrarrápida.
-    // Reservamos espacio para el bloque (16x16) MÁS 1 píxel de halo/borde por cada lado.
-    // Por tanto: 16 + 2 = 18.
+    // Reservamos espacio para el bloque (32x16) MÁS 1 píxel de halo/borde por cada lado.
+    // Por tanto: BLOCK_X + 2 = 34, BLOCK_Y + 2 = 18.
     __shared__ float s_tile[BLOCK_Y + 2][BLOCK_X + 2];
 
     // Identificadores locales del hilo dentro del bloque
@@ -29,8 +39,8 @@ __global__ void compute_stencil_cuda_shared(const float* T_old, float* T_new, in
     // 2. CARGA COOPERATIVA EN MEMORIA COMPARTIDA
     // Cada hilo carga su propio píxel central en el tile compartido.
     // Se suma +1 a los índices de shared para dejar espacio al halo.
-    if (gx < W && gy < H) //esto lo vimos en clase para no exceder los índices
-	{
+    if (gx < W && gy < H) // esto lo vimos en clase para no exceder los índices
+    {
         s_tile[ty + 1][tx + 1] = T_old[gy * W + gx];
     } else {
         s_tile[ty + 1][tx + 1] = 0.0f; // Padding de ceros si el bloque excede la matriz
@@ -75,9 +85,6 @@ __global__ void compute_stencil_cuda_shared(const float* T_old, float* T_new, in
     }
 }
 
-// -------------------------------------------------------------------------
-// FUNCIONES HOST (CPU)
-// -------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
     if (argc < 3) {
         std::cerr << "Uso: " << argv[0] << " <DIM_N> <ITER>" << std::endl;
@@ -89,9 +96,9 @@ int main(int argc, char* argv[]) {
 
     const int W = DIM_N; 
     const int H = DIM_N; 
-    const size_t bytes = W * H * sizeof(float);
+    const size_t SIZE_BYTES = W * H * sizeof(float);
 
-    // Matrices en el Host (RAM de la CPU)
+    // Matrices en el Host (RAM de la CPU) usando la clase std::vector para aprovechar el rendimiento
     std::vector<float> h_old(W * H, 0.0f);
     std::vector<float> h_new(W * H, 0.0f);
 
@@ -103,15 +110,17 @@ int main(int argc, char* argv[]) {
 
     // Punteros para el Device (VRAM de la GPU)
     float *d_old, *d_new;
-    cudaMalloc(&d_old, bytes);
-    cudaMalloc(&d_new, bytes);
+	
+	// Reservo memoria para el Device
+    cudaMalloc(&d_old, SIZE_BYTES);
+    cudaMalloc(&d_new, SIZE_BYTES);
 
     // Transferimos los datos iniciales de Host (CPU) a Device (GPU)
-    cudaMemcpy(d_old, h_old.data(), bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_new, h_new.data(), bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_old, h_old.data(), SIZE_BYTES, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_new, h_new.data(), SIZE_BYTES, cudaMemcpyHostToDevice);
 
     // Configuración del Grid y Blocks
-    dim3 blockSize(BLOCK_X, BLOCK_Y); // 16 x 16
+    dim3 blockSize(BLOCK_X, BLOCK_Y); // hilos por bloque
     // Calculamos cuántos bloques necesitamos para cubrir toda la matriz. 
     // Usamos (W + BLOCK_X - 1) / BLOCK_X para redondear siempre hacia arriba.
     dim3 gridSize((W + blockSize.x - 1) / blockSize.x, 
@@ -120,7 +129,9 @@ int main(int argc, char* argv[]) {
     std::cout << "Lanzando kernel en GPU con Grid: (" << gridSize.x << "x" << gridSize.y << ") "
               << "y Block: (" << blockSize.x << "x" << blockSize.y << ")\n";
 
-    auto start = std::chrono::high_resolution_clock::now();
+    // Creamos el timer de GPU antes del bucle
+    GpuTimer timer;
+    timer.Start();
 
     // Bucle temporal en el Host (Lanza múltiples kernels)
     for(int i = 0; i < NUM_ITERS; ++i) {
@@ -132,22 +143,21 @@ int main(int argc, char* argv[]) {
         std::swap(d_old, d_new);
     }
 
-    // Sincronizamos la GPU para asegurarnos de que ha terminado todas las iteraciones
-    // antes de parar el cronómetro. (CUDA ejecuta de forma asíncrona por defecto).
-    cudaDeviceSynchronize();
+    // Paramos el timer. Internamente llama a cudaEventSynchronize,
+    // así que ya no necesitamos cudaDeviceSynchronize() explícito.
+    timer.Stop();
 
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> diff = end - start;
-    std::cout << "Tiempo de ejecución (CUDA): " << std::fixed << std::setprecision(5) << diff.count() << " segundos" << std::endl;
+    std::cout << "Tiempo de ejecución (CUDA): " << std::fixed << std::setprecision(5) 
+              << timer.ElapsedMs() / 1000.0f << " segundos" << std::endl;
 
     // Al final del bucle temporal, por el swap, el resultado final siempre queda en d_old.
     // Lo traemos de vuelta a la CPU.
-    cudaMemcpy(h_old.data(), d_old, bytes, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_old.data(), d_old, SIZE_BYTES, cudaMemcpyDeviceToHost);
 
     // Imprimir resultado central de control
     std::cout << "Valor central final: " << h_old[(H/2)*W + (W/2)] << std::endl;
 
-    // Limpieza de VRAM
+    // Limpieza de VRAM una vez terminados todos los kernels
     cudaFree(d_old);
     cudaFree(d_new);
 

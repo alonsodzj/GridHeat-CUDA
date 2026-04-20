@@ -3,6 +3,7 @@
 #include <iomanip>
 #include <vector>
 #include <algorithm> // Para std::swap
+#include <omp.h>
 
 #define BLOCK_X 16
 #define BLOCK_Y 16
@@ -19,13 +20,35 @@ struct GpuTimer {
     float ElapsedMs() { float ms; cudaEventElapsedTime(&ms, start, stop); return ms; }
 };
 
+//Esto es para imprimir la matriz
+void print_matrix(const std::vector<float>& matrix, const int W, const int H) {
+    std::cout << "--- Matrix State ---" << std::endl;
+    for (int i = 0; i < H; ++i) {
+        for (int j = 0; j < W; ++j) {
+            std::cout << std::setw(8) << matrix[i * W + j] << "\t"; 
+        }
+        std::cout << "\n\n";
+    }
+    std::cout << std::endl;
+}
+
+//Esto decide si mandar a imprimir la matriz o enseñar el valor central
+void print_value(const int DIM_N, const int W, const int H, const std::vector<float>& matrix){
+    if (DIM_N <= 12) {
+        print_matrix(matrix, W, H);
+    } else {
+        std::cout << "Cálculo finalizado. Valor central: " << matrix[(H/2)*W + (W/2)] << std::endl;
+    }
+}
+
+
 // KERNEL DE CUDA
 // Añadimos __restrict__ a los punteros para indicarle al compilador que
 // T_old y T_new nunca se solapan en memoria. Esto habilita optimizaciones
-__global__ void compute_stencil_cuda_shared(const float* __restrict__ T_old, float* __restrict__ T_new, int W, int H) {
+__global__ void compute_stencil_cuda_shared(const float* __restrict__ T_old, float* __restrict__ T_new, const int W, const int H) {
     // 1. MEMORIA COMPARTIDA: Es como una caché L1 manual ultrarrápida.
-    // Reservamos espacio para el bloque (32x16) MÁS 1 píxel de halo/borde por cada lado.
-    // Por tanto: BLOCK_X + 2 = 34, BLOCK_Y + 2 = 18.
+    // Resrevamos memoria para el tamaño del bloque y dos por cada lado, 
+    //  borde izquierdo, borde derecho, borde superior e inferior
     __shared__ float s_tile[BLOCK_Y + 2][BLOCK_X + 2];
 
     // Identificadores locales del hilo dentro del bloque
@@ -103,6 +126,7 @@ int main(int argc, char* argv[]) {
     std::vector<float> h_new(W * H, 0.0f);
 
     // Inicializar borde superior
+    #pragma omp parallel for schedule(static)    //Esto es lo único que puedo paralelizar con openmp a priori
     for(int j = 0; j < W; ++j) {
         h_old[j] = 100.0f;
         h_new[j] = 100.0f; 
@@ -155,8 +179,8 @@ int main(int argc, char* argv[]) {
     cudaMemcpy(h_old.data(), d_old, SIZE_BYTES, cudaMemcpyDeviceToHost);
 
     // Imprimir resultado central de control
+    print_value(DIM_N,W,H,h_old);
     std::cout << "Valor central final: " << h_old[(H/2)*W + (W/2)] << std::endl;
-
     // Limpieza de VRAM una vez terminados todos los kernels
     cudaFree(d_old);
     cudaFree(d_new);
